@@ -150,10 +150,10 @@ class Segment:
     def get_opcode(self, application_key):
         raise NotImplementedError
 
-    def segments(self, application_key, seq, iv_index, payload, szmic):
+    def segments(self, application_key, seq, iv_index, payload, szmic, seg):
         opcode = self.get_opcode(application_key)
         seq_zero = seq & 0x1fff
-        seg = len(payload) > self.MAX_TRANSPORT_PDU
+        seg = seg or len(payload) > self.MAX_TRANSPORT_PDU
 
         if seg:
             segments = list(payload[i:i + self.SEGMENT_SIZE]
@@ -178,7 +178,7 @@ class AccessMessage(Segment):
         aid = application_key.aid
         return bitstring.pack('uint:1, uint:6', akf, aid)
 
-    def segments(self, application_key, seq, iv_index, szmic=False):
+    def segments(self, application_key, seq, iv_index, szmic=False, seg=False):
         short_mic_len = len(self.payload) + 4
         long_mic_len = len(self.payload) + 8
 
@@ -193,7 +193,8 @@ class AccessMessage(Segment):
         upper_transport_pdu = aes_ccm_encrypt(application_key.bytes, nonce,
                                               self.payload, b'', 8 if szmic else 4)
 
-        yield from super().segments(application_key, seq, iv_index, payload=upper_transport_pdu, szmic=szmic)
+        yield from super().segments(application_key, seq, iv_index, payload=upper_transport_pdu,
+                                    szmic=szmic, seg=seg)
 
 
 class ControlMessage(Segment):
@@ -205,8 +206,15 @@ class ControlMessage(Segment):
     def get_opcode(self, application_key):
         return bitstring.pack('uint:7', self.opcode)
 
-    def segments(self, application_key, seq, iv_index, szmic=False):
-        yield from super().segments(application_key, seq, iv_index, payload=self.payload, szmic=False)
+    def segments(self, application_key, seq, iv_index, szmic=False, seg=False):
+        if szmic:
+            raise NotImplementedError('Control messages do not support long MIC')
+
+        if seg:
+            raise NotImplementedError('Control messages do not support segmentation')
+
+        yield from super().segments(application_key, seq, iv_index, payload=self.payload,
+                                    szmic=False, seg=False)
 
 
 class SegmentAckMessage(ControlMessage):
@@ -226,7 +234,7 @@ class NetworkMessage:
     def __init__(self, message):
         self.message = message
 
-    def pack(self, application_key, network_key, seq, iv_index, *, transport_seq=None):
+    def pack(self, application_key, network_key, seq, iv_index, *, transport_seq=None, seg=False):
         nid, encryption_key, privacy_key = network_key.encryption_keys
 
         # when retrying a segment, use the original sequence number during application
@@ -234,8 +242,8 @@ class NetworkMessage:
         if transport_seq is None:
             transport_seq = seq
 
-        for seq, pdu in enumerate(self.message.segments(application_key, transport_seq, iv_index),
-                                  start=seq):
+        for seq, pdu in enumerate(self.message.segments(application_key, transport_seq, iv_index,
+                                  seg=seg), start=seq):
             network_pdu = aes_ccm_encrypt(encryption_key,
                                           self.message.nonce.network(seq, iv_index),
                                   bitstring.pack('uintbe:16, bytes', self.message.dst, pdu).bytes,
